@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>開始按鈕範例 — 血量、碰撞、得分</title>
+<style>
+:root{box-sizing:border-box}
+*,*::before,*::after{box-sizing:inherit}
+html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,'Noto Sans','Helvetica Neue',Arial}
+body{display:flex;align-items:center;justify-content:center;background:#f3f4f6}
+.center-wrap{display:flex;align-items:center;justify-content:center;height:100%;width:100%}
+.start-btn{appearance:none;border:0;padding:18px 36px;border-radius:12px;background:#111827;color:white;font-size:18px;cursor:pointer;box-shadow:0 6px 18px rgba(17,24,39,.25);transition:transform .15s ease,opacity .15s ease}
+.start-btn:active{transform:translateY(1px) scale(.995)}
+.start-btn:focus{outline:3px solid rgba(59,130,246,.3)}
+.blank-screen{position:fixed;inset:0;background:white;display:none;align-items:center;justify-content:center;z-index:10}
+.blank-screen.show{display:flex;animation:fadeIn .25s ease both}
+canvas{width:100%;height:100%;display:block}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.msg{position:fixed;left:20px;top:20px;font-size:20px;color:#111;opacity:0;transition:opacity .3s ease}
+.msg.show{opacity:1}
+.scoreboard{position:fixed;right:20px;top:20px;font-size:22px;font-weight:bold;color:#111}
+#gameOverScreen{display:none; position:absolute; inset:0; background:rgba(0,0,0,0.7); color:white; font-size:32px; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:20;}
+#gameOverScreen button{padding:12px 24px; font-size:20px; border-radius:8px; border:none; cursor:pointer;}
+</style>
+</head>
+<body>
+<div class="center-wrap" id="start-screen">
+  <button class="start-btn" id="startBtn">開始</button>
+</div>
+<div class="blank-screen" id="blank">
+  <canvas id="gameCanvas"></canvas>
+  <div class="msg" id="msg"></div>
+  <div class="scoreboard" id="scoreboard">分數: 0</div>
+  <div id="gameOverScreen">
+    <div id="gameOverText" style="margin-bottom:20px; text-align:center;"></div>
+    <button id="restartBtn">重新開始</button>
+  </div>
+</div>
+
+<script>
+const startBtn = document.getElementById('startBtn');
+const startScreen = document.getElementById('start-screen');
+const blank = document.getElementById('blank');
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const msg = document.getElementById('msg');
+const scoreboard = document.getElementById('scoreboard');
+const gameOverScreen = document.getElementById('gameOverScreen');
+const gameOverText = document.getElementById('gameOverText');
+
+function resizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(window.innerWidth*dpr);
+  canvas.height = Math.floor(window.innerHeight*dpr);
+  canvas.style.width = window.innerWidth+'px';
+  canvas.style.height = window.innerHeight+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+
+// 遊戲變數
+const RADIUS = 40;
+const SPEED = 0.18;
+const BULLET_SPEED = 10;
+const BULLET_RADIUS = 16;
+const BOX_SIZE = 48;
+const MIN_FIRE_INTERVAL = 200;
+
+let pos = {x: innerWidth/2, y: innerHeight/2};
+let target = {x: innerWidth/2, y: innerHeight/2};
+let playerHealth = 100;
+let bullets = [], bulletTimer = null, fireInterval = 500;
+let attackPower = 10, attackBonus = 0;
+let extraTrajectories = 0;
+let boxes = [], boxTimer = null;
+let enemies = [], enemySpawner = null;
+let enemiesPaused = false;
+let mousePos = {x:null, y:null};
+let score = 0, highScore = 0;
+let playerSpeedMultiplier = 1;
+let animId = null;
+
+function showMsg(text){ msg.textContent = text; msg.classList.add('show'); setTimeout(()=>msg.classList.remove('show'),1200);}
+function updateScore(){ scoreboard.textContent = '分數: '+score;}
+function updateTargetFromEvent(e){ 
+  const r = canvas.getBoundingClientRect();
+  if(e.touches){ target.x = e.touches[0].clientX-r.left; target.y = e.touches[0].clientY-r.top; }
+  else{ target.x = e.clientX-r.left; target.y = e.clientY-r.top; }
+  mousePos.x = target.x; mousePos.y = target.y;
+}
+
+function showEffectMessage(msg){ showMsg(msg); }
+function clearNearbyEnemies(){
+  let removed = 0;
+  const radius = 300;
+  for(let i=enemies.length-1;i>=0;i--){
+    if(Math.hypot(pos.x-enemies[i].x,pos.y-enemies[i].y)<=radius){
+      enemies.splice(i,1); removed++; score+=10; updateScore();
+    }
+  }
+  return removed;
+}
+
+function applyBoxEffect(){
+  const idx = Math.floor(Math.random()*8);
+  switch(idx){
+    case 0: playerHealth=Math.min(100,playerHealth+20); showEffectMessage('回復 20 HP'); break;
+    case 1: playerHealth=Math.min(100,playerHealth+50); showEffectMessage('回復 50 HP'); break;
+    case 2: extraTrajectories++; showEffectMessage('新增一條彈道（永久）'); break;
+    case 3: fireInterval=Math.max(MIN_FIRE_INTERVAL,fireInterval-50); setBulletTimer(); showEffectMessage('子彈發射頻率提升'); break;
+    case 4: enemiesPaused=true; showEffectMessage('暫停敵人 2 秒'); setTimeout(()=>{enemiesPaused=false;},2000); break;
+    case 5: attackBonus+=5; showEffectMessage('攻擊力 +5（永久）'); break;
+    case 6: const removed = clearNearbyEnemies(); showEffectMessage('清除附近敵人：'+removed+' 隻'); break;
+    case 7: playerSpeedMultiplier*=1.6; showEffectMessage('加速 3 秒'); setTimeout(()=>{playerSpeedMultiplier/=1.6;},3000); break;
+  }
+}
+
+function fireBullet(){
+  if(mousePos.x===null) return;
+  const base=Math.atan2(pos.y-mousePos.y,pos.x-mousePos.x);
+  function addBullet(a){ bullets.push({x:pos.x,y:pos.y,vx:Math.cos(a)*BULLET_SPEED,vy:Math.sin(a)*BULLET_SPEED});}
+  addBullet(base);
+  for(let i=0;i<extraTrajectories;i++){
+    const offsets=[Math.PI,Math.PI/2,-Math.PI/2,Math.PI/4,-Math.PI/4,3*Math.PI/4,-3*Math.PI/4];
+    addBullet(base+offsets[Math.floor(Math.random()*offsets.length)]);
+  }
+}
+
+function setBulletTimer(){ if(bulletTimer) clearInterval(bulletTimer); bulletTimer=setInterval(fireBullet,fireInterval); }
+function updateBullets(){ bullets.slice().reverse().forEach((b,i)=>{ b.x+=b.vx; b.y+=b.vy; for(let j=enemies.length-1;j>=0;j--){ const e=enemies[j]; if(Math.hypot(b.x-e.x,b.y-e.y)<BULLET_RADIUS+e.size/2){ e.health-=attackPower+attackBonus; if(e.health<=0){ enemies.splice(j,1); score+=10; updateScore(); } bullets.splice(bullets.indexOf(b),1); break; } } if(b.x<-50||b.x>innerWidth+50||b.y<-50||b.y>innerHeight+50) bullets.splice(bullets.indexOf(b),1); }); }
+function spawnBox(){ boxes.push({x:Math.random()*(innerWidth-BOX_SIZE), y:Math.random()*(innerHeight-BOX_SIZE), size:BOX_SIZE}); }
+function drawBoxes(){ boxes.forEach(b=>{ ctx.fillStyle='#8B5A2B'; ctx.fillRect(b.x,b.y,b.size,b.size); ctx.strokeStyle='#4b2e14'; ctx.strokeRect(b.x,b.y,b.size,b.size); }); }
+
+function spawnEnemies(){ if(enemiesPaused) return; const c=Math.floor(Math.random()*2)+1; for(let i=0;i<c;i++){ const size=30; const edge=Math.floor(Math.random()*4); let x,y; if(edge===0){ x=Math.random()*innerWidth; y=-size; } else if(edge===1){ x=Math.random()*innerWidth; y=innerHeight+size; } else if(edge===2){ x=-size; y=Math.random()*innerHeight; } else{ x=innerWidth+size; y=Math.random()*innerHeight; } enemies.push({x,y,size,speed:1.5,health:10}); } }
+function updateEnemies(){ if(enemiesPaused) return; enemies.forEach(e=>{ const dx=pos.x-e.x, dy=pos.y-e.y; const d=Math.hypot(dx,dy)||1; e.x+=dx/d*e.speed*playerSpeedMultiplier; e.y+=dy/d*e.speed*playerSpeedMultiplier; }); }
+function drawEnemies(){ ctx.fillStyle='blue'; enemies.forEach(e=>{ ctx.beginPath(); ctx.moveTo(e.x,e.y-e.size/2); ctx.lineTo(e.x-e.size/2,e.y+e.size/2); ctx.lineTo(e.x+e.size/2,e.y+e.size/2); ctx.fill(); }); }
+function circleDist(ax,ay,bx,by){ return Math.hypot(ax-bx,ay-by); }
+
+function checkCollisions(){ boxes.slice().reverse().forEach(b=>{ const h=b.size/2; const cx=Math.max(b.x, Math.min(pos.x,b.x+h)); const cy=Math.max(b.y, Math.min(pos.y,b.y+h)); if(circleDist(pos.x,pos.y,cx,cy)<=RADIUS){ boxes.splice(boxes.indexOf(b),1); applyBoxEffect(); } });
+ enemies.slice().reverse().forEach(e=>{ if(circleDist(pos.x,pos.y,e.x,e.y)<=RADIUS+e.size/2){ playerHealth-=10; enemies.splice(enemies.indexOf(e),1); if(playerHealth<=0) gameOver(); } });
+}
+
+function drawPlayer(){ ctx.beginPath(); ctx.arc(pos.x,pos.y,RADIUS,0,Math.PI*2); ctx.fillStyle='#ef4444'; ctx.fill(); ctx.strokeStyle='#000'; ctx.lineWidth=4; ctx.stroke(); const bw=70, bh=10, p=playerHealth/100; ctx.fillStyle='black'; ctx.fillRect(pos.x-bw/2,pos.y-RADIUS-20,bw,bh); ctx.fillStyle='lime'; ctx.fillRect(pos.x-bw/2,pos.y-RADIUS-20,bw*p,bh); }
+function drawBullets(){ bullets.forEach(b=>{ ctx.beginPath(); ctx.arc(b.x,b.y,BULLET_RADIUS,0,Math.PI*2); ctx.fillStyle='#ef4444'; ctx.fill(); ctx.lineWidth=3; ctx.strokeStyle='black'; ctx.stroke(); }); }
+
+function loop(){ updateBullets(); updateEnemies(); checkCollisions(); ctx.clearRect(0,0,innerWidth,innerHeight); pos.x+=(target.x-pos.x)*SPEED*playerSpeedMultiplier; pos.y+=(target.y-pos.y)*SPEED*playerSpeedMultiplier; drawBoxes(); drawPlayer(); drawBullets(); drawEnemies(); animId=requestAnimationFrame(loop); }
+
+function goBlank(){ startScreen.style.display='none'; blank.classList.add('show'); resizeCanvas(); pos.x=target.x=innerWidth/2; pos.y=target.y=innerHeight/2; canvas.addEventListener('mousemove',updateTargetFromEvent); if(!animId) loop(); score=0; updateScore(); setBulletTimer(); boxTimer=setInterval(spawnBox,4000); setTimeout(()=>enemySpawner=setInterval(spawnEnemies,1000),5000); spawnBox(); gameOverScreen.style.display='none'; }
+function stopAndReset(){ blank.classList.remove('show'); startScreen.style.display='flex'; canvas.removeEventListener('mousemove',updateTargetFromEvent); if(bulletTimer) clearInterval(bulletTimer); if(boxTimer) clearInterval(boxTimer); if(enemySpawner) clearInterval(enemySpawner); if(animId) cancelAnimationFrame(animId); animId=null; bullets=[]; boxes=[]; enemies=[]; playerHealth=100; extraTrajectories=0; attackPower=10; attackBonus=0; fireInterval=500; playerSpeedMultiplier=1; }
+
+function gameOver(){ highScore=Math.max(highScore,score); if(animId) cancelAnimationFrame(animId); animId=null; if(bulletTimer) clearInterval(bulletTimer); if(boxTimer) clearInterval(boxTimer); if(enemySpawner) clearInterval(enemySpawner); canvas.removeEventListener('mousemove',updateTargetFromEvent); gameOverText.textContent=`遊戲結束\n本次得分: ${score}\n最高分: ${highScore}`; gameOverScreen.style.display='flex'; }
+
+// 事件
+startBtn.addEventListener('click',()=>{ stopAndReset(); goBlank(); });
+document.getElementById('restartBtn').addEventListener('click',()=>{ gameOverScreen.style.display='none'; stopAndReset(); goBlank(); });
+resizeCanvas();
+</script>
+</body>
+</html>
